@@ -61,7 +61,9 @@ app.post("/traffic", async (req, res) => {
     }
 
     const responseText =
-      `From ${origin} to ${destination}, estimated travel time is ${durationMin || "unknown"} minutes. ${trafficNote}`;
+  `The quickest route from ${origin} to ${destination} is currently estimated at ${durationMin || "unknown"} minutes. ` +
+  `${trafficNote} ` +
+  `Possible traffic may be near major motorway junctions or busy city approaches on this route.`;
 
     return res.json({
       response: responseText
