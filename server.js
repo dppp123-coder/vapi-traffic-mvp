@@ -1,5 +1,6 @@
 import express from "express";
 import fetch from "node-fetch";
+import { XMLParser } from "fast-xml-parser";
 
 const app = express();
 app.use(express.json());
@@ -24,10 +25,59 @@ async function geocode(place) {
     throw new Error(`Could not find location: ${place}`);
   }
 
-  const lat = data[0].lat;
-  const lon = data[0].lon;
+  return `${data[0].lon},${data[0].lat}`;
+}
 
-  return `${lon},${lat}`;
+async function getNationalHighwaysIncidents() {
+  const feedUrls = [
+    "https://m.highwaysengland.co.uk/feeds/rss/UnplannedEvents.xml",
+    "https://m.highwaysengland.co.uk/feeds/rss/CurrentAndFutureEvents.xml"
+  ];
+
+  const parser = new XMLParser();
+  const allItems = [];
+
+  for (const feedUrl of feedUrls) {
+    try {
+      const res = await fetch(feedUrl);
+      const xml = await res.text();
+      const data = parser.parse(xml);
+
+      const items = data?.rss?.channel?.item || [];
+
+      if (Array.isArray(items)) {
+        allItems.push(...items);
+      } else if (items) {
+        allItems.push(items);
+      }
+    } catch (err) {
+      console.error("National Highways feed error:", err.message);
+    }
+  }
+
+  return allItems;
+}
+
+function cleanRoadName(name) {
+  if (!name) return null;
+
+  const cleaned = name.trim();
+
+  if (!cleaned) return null;
+
+  return cleaned;
+}
+
+function findMatchingIncidents(incidents, roads) {
+  return incidents
+    .filter((item) => {
+      const text = `${item.title || ""} ${item.description || ""}`.toLowerCase();
+
+      return roads.some((road) =>
+        text.includes(road.toLowerCase())
+      );
+    })
+    .slice(0, 3);
 }
 
 app.post("/traffic", async (req, res) => {
@@ -44,26 +94,56 @@ app.post("/traffic", async (req, res) => {
     const destinationCoords = await geocode(destination);
 
     const routeUrl =
-      `https://router.project-osrm.org/route/v1/driving/${originCoords};${destinationCoords}?overview=false`;
+      `https://router.project-osrm.org/route/v1/driving/${originCoords};${destinationCoords}?overview=full&steps=true`;
 
     const routeRes = await fetch(routeUrl);
     const routeData = await routeRes.json();
 
-    const durationSec = routeData?.routes?.[0]?.duration || null;
-    const durationMin = durationSec ? Math.round(durationSec / 60) : null;
+    const route = routeData?.routes?.[0];
 
-    let trafficNote = "Traffic looks normal.";
+    if (!route) {
+      return res.json({
+        response: `Sorry, I could not find a route from ${origin} to ${destination}.`
+      });
+    }
 
-    if (durationMin > 160) {
+    const durationMin = Math.round(route.duration / 60);
+
+    const steps = route.legs?.flatMap((leg) => leg.steps || []) || [];
+
+    const roads = steps
+      .map((step) => cleanRoadName(step.name))
+      .filter(Boolean);
+
+    const uniqueRoads = [...new Set(roads)].slice(0, 10);
+
+    const routeSummary = uniqueRoads.length
+      ? `The quickest route appears to use ${uniqueRoads.join(", ")}.`
+      : "Specific road names are not available for this route.";
+
+    const incidents = await getNationalHighwaysIncidents();
+    const matchingIncidents = findMatchingIncidents(incidents, uniqueRoads);
+
+    const incidentSummary = matchingIncidents.length
+      ? "Live National Highways incidents found: " +
+        matchingIncidents.map((item) => item.title).join(". ")
+      : "No matching live National Highways incidents were found on the main roads identified.";
+
+    let trafficNote = "Traffic appears normal based on the current route estimate.";
+
+    if (durationMin > 240) {
+      trafficNote = "There may be severe delays.";
+    } else if (durationMin > 180) {
       trafficNote = "There may be heavy delays.";
     } else if (durationMin > 120) {
       trafficNote = "There may be moderate delays.";
     }
 
     const responseText =
-  `The quickest route from ${origin} to ${destination} is currently estimated at ${durationMin || "unknown"} minutes. ` +
-  `${trafficNote} ` +
-  `Possible traffic may be near major motorway junctions or busy city approaches on this route.`;
+      `The quickest route from ${origin} to ${destination} is estimated at ${durationMin} minutes. ` +
+      `${routeSummary} ` +
+      `${trafficNote} ` +
+      `${incidentSummary}`;
 
     return res.json({
       response: responseText
