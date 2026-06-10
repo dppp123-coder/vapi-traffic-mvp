@@ -60,12 +60,31 @@ async function getNationalHighwaysIncidents() {
 
 function cleanRoadName(name) {
   if (!name) return null;
-
   const cleaned = name.trim();
+  return cleaned || null;
+}
 
-  if (!cleaned) return null;
+function isMajorRoad(name) {
+  if (!name) return false;
 
-  return cleaned;
+  return /\b(M\d+|A\d+\(M\)|A\d+)\b/i.test(name);
+}
+
+function extractMajorRoads(steps) {
+  const roads = steps
+    .map((step) => cleanRoadName(step.name))
+    .filter(Boolean)
+    .filter(isMajorRoad);
+
+  return [...new Set(roads)].slice(0, 8);
+}
+
+function extractFallbackRoads(steps) {
+  const roads = steps
+    .map((step) => cleanRoadName(step.name))
+    .filter(Boolean);
+
+  return [...new Set(roads)].slice(0, 8);
 }
 
 function findMatchingIncidents(incidents, roads) {
@@ -77,7 +96,31 @@ function findMatchingIncidents(incidents, roads) {
         text.includes(road.toLowerCase())
       );
     })
-    .slice(0, 3);
+    .slice(0, 4);
+}
+
+function createHotspots(roads, origin, destination) {
+  if (!roads.length) {
+    return [
+      `approaching ${origin}`,
+      `approaching ${destination}`,
+      "busy town centre roads"
+    ];
+  }
+
+  const hotspots = [];
+
+  for (const road of roads.slice(0, 5)) {
+    if (/^M/i.test(road)) {
+      hotspots.push(`${road} motorway junctions and interchanges`);
+    } else if (/^A/i.test(road)) {
+      hotspots.push(`${road} busy roundabouts and town approaches`);
+    }
+  }
+
+  hotspots.push(`approaching ${destination}`);
+
+  return [...new Set(hotspots)].slice(0, 5);
 }
 
 app.post("/traffic", async (req, res) => {
@@ -108,42 +151,45 @@ app.post("/traffic", async (req, res) => {
     }
 
     const durationMin = Math.round(route.duration / 60);
-
     const steps = route.legs?.flatMap((leg) => leg.steps || []) || [];
 
-    const roads = steps
-      .map((step) => cleanRoadName(step.name))
-      .filter(Boolean);
+    const majorRoads = extractMajorRoads(steps);
+    const fallbackRoads = extractFallbackRoads(steps);
+    const routeRoads = majorRoads.length ? majorRoads : fallbackRoads.slice(0, 5);
 
-    const uniqueRoads = [...new Set(roads)].slice(0, 10);
-
-    const routeSummary = uniqueRoads.length
-      ? `The quickest route appears to use ${uniqueRoads.join(", ")}.`
-      : "Specific road names are not available for this route.";
+    const routeSummary = routeRoads.length
+      ? routeRoads.join(" → ")
+      : "route details unavailable";
 
     const incidents = await getNationalHighwaysIncidents();
-    const matchingIncidents = findMatchingIncidents(incidents, uniqueRoads);
+    const matchingIncidents = findMatchingIncidents(incidents, routeRoads);
 
-    const incidentSummary = matchingIncidents.length
-      ? "Live National Highways incidents found: " +
-        matchingIncidents.map((item) => item.title).join(". ")
-      : "No matching live National Highways incidents were found on the main roads identified.";
-
-    let trafficNote = "Traffic appears normal based on the current route estimate.";
+    let trafficLevel = "Traffic appears normal based on the current route estimate.";
 
     if (durationMin > 240) {
-      trafficNote = "There may be severe delays.";
+      trafficLevel = "There may be severe delays.";
     } else if (durationMin > 180) {
-      trafficNote = "There may be heavy delays.";
+      trafficLevel = "There may be heavy delays.";
     } else if (durationMin > 120) {
-      trafficNote = "There may be moderate delays.";
+      trafficLevel = "There may be moderate delays.";
     }
 
+    const hotspots = createHotspots(routeRoads, origin, destination);
+
+    const hotspotText = hotspots.length
+      ? hotspots.map((spot) => `- ${spot}`).join(" ")
+      : "- No obvious hotspots found.";
+
+    const incidentText = matchingIncidents.length
+      ? matchingIncidents.map((item) => `- ${item.title}`).join(" ")
+      : "- No matching live National Highways incidents were found on the main roads identified.";
+
     const responseText =
-      `The quickest route from ${origin} to ${destination} is estimated at ${durationMin} minutes. ` +
-      `${routeSummary} ` +
-      `${trafficNote} ` +
-      `${incidentSummary}`;
+      `Quickest route from ${origin} to ${destination}: ${routeSummary}. ` +
+      `Estimated travel time: ${durationMin} minutes. ` +
+      `${trafficLevel} ` +
+      `Likely traffic hotspots: ${hotspotText} ` +
+      `Live National Highways incidents: ${incidentText}`;
 
     return res.json({
       response: responseText
